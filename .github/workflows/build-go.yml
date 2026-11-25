@@ -1,0 +1,98 @@
+name: Go simple build
+
+on:
+  workflow_call:
+    inputs:
+      os:
+        type: string
+        required: true
+
+jobs:
+  build:
+    runs-on: ${{ inputs.os }}
+    steps:
+    - name: Setup variables
+      shell: bash
+      run: |
+        if [[ "${{ runner.os }}" == "Linux" ]]; then
+          echo "GO_PREFIX=/opt/hostedtoolcache" | tee -a "$GITHUB_ENV"
+          echo "COMMAND=tar zcvf" | tee -a "$GITHUB_ENV"
+          echo "EXT=tgz" | tee -a "$GITHUB_ENV"
+        elif [[ "${{ runner.os }}" == "Windows" ]]; then
+          echo "GO_PREFIX=C:/hostedtoolcache/windows" | tee -a "$GITHUB_ENV"
+          echo "COMMAND=7z a -tzip" | tee -a "$GITHUB_ENV"
+          echo "EXT=zip" | tee -a "$GITHUB_ENV"
+        elif [[ "${{ runner.os }}" == "macOS" ]]; then
+          echo "GO_PREFIX=/opt/hostedtoolcache" | tee -a "$GITHUB_ENV"
+          echo "COMMAND=tar zcvf" | tee -a "$GITHUB_ENV"
+          echo "EXT=tgz" | tee -a "$GITHUB_ENV"
+        else
+          echo "Unknown OS: ${{ runner.os }}"
+          exit 1
+        fi
+
+    - name: "DEBUG: dump context variables"
+      run: |
+        echo "github.ref        = ${{ github.ref }}"
+        echo "github.ref_type   = ${{ github.ref_type }}"
+        echo "github.ref_name   = ${{ github.ref_name }}"
+        echo "github.event_name = ${{ github.event_name }}"
+        echo "github.base_ref   = ${{ github.base_ref }}"
+        echo "github.head_ref   = ${{ github.head_ref }}"
+        echo "github.api_url    = ${{ github.api_url }}"
+        echo "runner.os         = ${{ runner.os }}"
+        echo "runner.arch       = ${{ runner.arch }}"
+
+    - name: Checkout code
+      uses: actions/checkout@v7
+
+    - name: Determine Go version
+      shell: bash  # Windows runners on Github have Git Bash!
+      run: |
+        GO_VERSION=$(sed -n 's/^go \([0-9.]*\)$/\1/p' go.mod)
+        echo "GO_VERSION=$GO_VERSION" | tee -a "$GITHUB_ENV"
+      # Separately - to capture the error if go.mod is not found
+
+    - name: Restore Go from cache
+      if: runner.os != 'Windows'  # TODO: Currently this will cause Windows to fail: github.com/actions/setup-go/pull/816
+      uses: actions/cache@v4
+      with:
+        # setup-go looks for Go here (and a .complete marker that marks that it's fully installed!)
+        path: |
+          ${{ env.GO_PREFIX }}/go/${{ env.GO_VERSION }}/x64
+          ${{ env.GO_PREFIX }}/go/${{ env.GO_VERSION }}/x64.complete
+        key: go-${{ runner.os }}-${{ runner.arch }}-${{ env.GO_VERSION }}
+        # Those paths will be restored if a job with the same key already created the cache
+
+    - name: Set up Go
+      uses: actions/setup-go@v7
+      with:
+        go-version-file: 'go.mod'        # Get Go version from the project
+        check-latest: true               # Install 1.23.4 if 1.23 is specified
+        cache-dependency-path: 'go.sum'  # Files to hash and use as cache key (e.g. list of deps)
+
+    - name: Test
+      run: make test
+
+    - name: Build
+      run: make build
+
+    - name: Archive
+      shell: bash  # Windows runners on Github have Git Bash!
+      run: |
+        FILENAME="${GITHUB_REPOSITORY#*/}-$(go env GOOS)-$(go env GOARCH)"
+        echo "FILENAME=$FILENAME" | tee -a "$GITHUB_ENV"
+        echo "--> Archiving the artifact..."
+        cd bin && $COMMAND ../$FILENAME.$EXT *
+        echo "--> Done"
+        echo
+        ls -lha ..
+
+    # Zips when uploading, then unzips when downloading
+    - name: Upload artifact
+      uses: actions/upload-artifact@v7
+      with:
+        name: ${{ env.FILENAME }}
+        path: ${{ env.FILENAME }}.${{ env.EXT }}
+        retention-days: 1
+        if-no-files-found: error
